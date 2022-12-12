@@ -12,7 +12,18 @@ class NewPageController extends AbstractController
     public function index(): Response
     {
         return new Response(
-            '<html><body>Hello welcome to new page</body></html>'
+            '<html>
+                <body>
+                    Hello welcome to new page.
+                    <br>
+                    '.$this->personalMessage().'
+                </body>
+            </html>'
         );
+    }
+
+    public function personalMessage(): string
+    {
+        return "PHP is cool";
     }
 }
