@@ -1,0 +1,44 @@
+name: deploy-to-aws-eb
+# Controls when the action will run. 
+on:
+  # Triggers the workflow on push or pull request events but only for the main branch
+  push:
+    branches: [ development-2 ]
+    # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+jobs:
+  # This workflow contains a single job called "build"
+  build:
+    # The type of runner that the job will run on
+    runs-on: ubuntu-22.04 
+    steps:     
+      - uses: actions/checkout@master
+      - name: Run PHP Unit tests
+        run: |
+          composer install
+          php bin/phpunit
+        shell: bash
+      - name: Add AWS CLI credentials
+        run: |
+          mkdir ~/.aws
+          echo '[profile eb-cli]
+          aws_access_key_id = ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key = ${{ secrets.AWS_SECRET_ACCESS_KEY }}' > ~/.aws/config
+        shell: bash
+      - name: Set permissions
+        run: chmod +x .github/scripts/install-eb-command.sh
+        shell: bash
+      - name: Install eb command
+        run: ./.github/scripts/install-eb-command.sh
+        shell: bash
+      - name: Deploy to AWS Elastic Beanstalk
+        run: eb deploy
+        shell: bash
+      - name: Clean up GitHub Actions Pipeline
+        if: always()
+        run: |
+          rm -rf ~/.aws || true
+          rm -rf ./* || true
+          rm -rf ./.??* || true
+        shell: bash
