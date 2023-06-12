@@ -1,0 +1,18 @@
+# CodeBuild BuildSpec file to build and test PHP/Symfony application 
+version: 0.2
+env:
+  secrets-manager:
+    DOCKERHUB_USERNAME: "DockerUsername"
+    DOCKERHUB_PASS: "DockerPassword"
+phases:
+  pre_build:
+    commands:
+      - docker login --username $DOCKERHUB_USERNAME --password $DOCKERHUB_PASS
+  build:
+    commands:
+      - composer install
+      - php bin/phpunit
+  
+artifacts:
+  files: 
+    - '**/*'

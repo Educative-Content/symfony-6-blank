@@ -1,0 +1,279 @@
+# Cloudformation template for Educative Symfony CI/CD Pipeline using AWS Services
+
+Description:
+  CodeCommit repository
+  https://docs.aws.amazon.com/codecommit/latest/userguide/welcome.html
+
+Parameters:
+  RepositoryName:
+    Description: "CodeCommit repository name"
+    Type: String
+    Default: "educative-symfony-aws"
+    AllowedPattern: "[a-zA-Z0-9-]+"
+    ConstraintDescription: "Must contain only alphanumeric characters or hyphens"
+    MaxLength: 100
+    MinLength: 1
+
+Resources:
+
+  # CodeCommit repository
+  # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-codecommit-repository.html
+  CodeCommitRepository:
+    Type: AWS::CodeCommit::Repository
+    Properties:
+      RepositoryName: !Ref RepositoryName    
+  
+  # S3 bucket to store artifacts
+  # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-s3-bucket.html
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref RepositoryName
+      AccessControl: Private
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: "Delete old artifacts"
+            Status: Enabled
+            ExpirationInDays: 1
+            NoncurrentVersionExpirationInDays: 1
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # CodeBuild
+  # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-codebuild-project.html
+  CodeBuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Ref RepositoryName
+      Description: "Educative Symfony CI/CD Pipeline"
+      Artifacts:
+        Type: S3
+        Location: !Ref RepositoryName
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: azcodes/educative-symfony-cicd:latest
+        PrivilegedMode: true
+        Type: LINUX_CONTAINER
+      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+      Source:
+        Type: CODECOMMIT
+        Location: !GetAtt CodeCommitRepository.CloneUrlHttp
+      TimeoutInMinutes: 5
+
+  # CodeBuild role
+  # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-iam-role.html
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: "CodeBuildServiceRolePolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:*
+                Resource: "arn:aws:logs:*:*:*"
+              - Effect: Allow
+                Action:
+                  - s3:*
+                Resource: !Join ["", ["arn:aws:s3:::", !Ref RepositoryName, "/*"]]
+              - Effect: Allow
+                Action:
+                  - ecr:*                  
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - elasticbeanstalk:*                  
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - codebuild:*
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - codepipeline:*
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'secretsmanager:GetSecretValue'
+                Resource: 
+                  - 'arn:aws:secretsmanager:*:*:secret:Docker*'
+
+  # CodePipeline
+  # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-codepipeline-pipeline.html
+  CodePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Ref RepositoryName
+      RoleArn: !GetAtt CodePipelineRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref RepositoryName
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: SourceAction
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Version: 1
+                Provider: CodeCommit
+              Configuration:
+                RepositoryName: !Ref RepositoryName
+                BranchName: development
+              OutputArtifacts:
+                - Name: SourceOutput
+              RunOrder: 1
+        - Name: Build
+          Actions:
+            - Name: BuildAction
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              InputArtifacts:
+                - Name: SourceOutput
+              OutputArtifacts:
+                - Name: BuildOutput
+              Configuration:
+                ProjectName: !Ref CodeBuild
+              RunOrder: 1
+        - Name: Deploy
+          Actions:
+            - Name: DeployAction
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: 1
+                Provider: ElasticBeanstalk
+              InputArtifacts:
+                - Name: BuildOutput
+              Configuration:
+                ApplicationName: "educative-symfony"
+                EnvironmentName: "educative-symfony-dev"
+              RunOrder: 1
+
+  AmazonCloudWatchEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      EventPattern:
+        source:
+          - aws.codecommit
+        detail-type:
+          - 'CodeCommit Repository State Change'
+        resources:
+          - !Join [ '', [ 'arn:aws:codecommit:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':', !Ref RepositoryName ] ]
+        detail:
+          event:
+            - referenceCreated
+            - referenceUpdated
+          referenceType:
+            - branch
+          referenceName:
+            - development
+      Targets:
+        -
+          Arn: 
+            !Join [ '', [ 'arn:aws:codepipeline:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':', !Ref RepositoryName ] ]
+          RoleArn: !GetAtt AmazonCloudWatchEventRole.Arn
+          Id: codepipeline-AppPipeline
+
+  AmazonCloudWatchEventRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - events.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Policies:
+        -
+          PolicyName: cwe-pipeline-execution
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Effect: Allow
+                Action: codepipeline:StartPipelineExecution
+                Resource: !Join [ '', [ 'arn:aws:codepipeline:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':', !Ref RepositoryName ] ] 
+
+  # CodePipeline role
+  # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-iam-role.html
+  CodePipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: "CodePipelineServiceRolePolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - codebuild:StartBuild
+                Resource: !GetAtt CodeBuild.Arn
+              - Effect: Allow
+                Action:
+                  - codecommit:*                  
+                Resource: !GetAtt CodeCommitRepository.Arn
+              - Effect: Allow
+                Action:
+                  - s3:*                  
+                Resource: !Join ["", ["arn:aws:s3:::", !Ref RepositoryName, "/*"]]
+              - Effect: Allow
+                Action:
+                  - ecr:*                  
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'elasticbeanstalk:*'
+                  - 'ec2:*'
+                  - 'elasticloadbalancing:*'
+                  - 'autoscaling:*'
+                  - 'cloudwatch:*'
+                  - 's3:*'
+                  - 'sns:*'
+                  - 'cloudformation:*'
+                  - 'rds:*'
+                  - 'sqs:*'
+                  - 'iam:PassRole'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - codebuild:*
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - events:*
+                Resource: '*'
